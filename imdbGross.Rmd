@@ -1,0 +1,368 @@
+---
+title: "The influencing factors on the movie gross"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+library(XML)
+library(rjson)
+library(quanteda)
+library(reshape2)
+library(ggplot2)
+library(corpustools)
+library(lubridate)
+library(XML2R)
+library(XML)
+library(httr)
+library(rvest)
+library(gofastr)
+library(corrplot) 
+library(gridExtra)
+load('/Users/zxy/Desktop/R/gross+url-individual.RData')
+
+```
+
+## 1. Research question
+
+There are growing interests in the factors that influence consumers’ purchase decisions at movies,factors like word-of-mouth (WOM) and content(or plot) of movies can impact movie box office(gross) and rating (Otterbacher, 2010; Thompson, Yokota, 2004;Joshi, Das, Smith, 2010; Duan, Whinston, 2008).$^{1-4}$ This assignment aims to explore the relationship among plot,WOM,rating,budget,and box office.
+
+There are three main parts:
+
+1) Data scraping：
+
+a. __[Movie box office](http://www.the-numbers.com/movies/records/allbudgets.php)__ by web scarping. 
+
+b. Movie information(e.g, rating,title,plot) from __[imdb](http://www.omdbapi.com)__ by open api. 
+
+c. Word-of-mouth from the __[moviedb](https://www.themoviedb.org)__ by registered api. 
+2) Clean and merge three data sets.
+
+3) Analyze data.
+
+## 2. Data scraping
+
+Scarp 'movie box office' from 2013 to 2017.
+
+```{r,eval=FALSE}
+#seting and extract  box office table.
+gorss_url = "http://www.the-numbers.com/movies/records/allbudgets.php"
+fromDate = "2013-01-01"
+tables = readHTMLTable(gross_url, stringsAsFactors = FALSE)
+
+# pick the table with box office and deal with missing vaules.
+table <- tables$`NULL`
+table = na.omit(table)
+table = table[,-1]
+
+#pick the data>2013
+table$`Release Date` = as.Date(table$`Release Date`,"%m/%d/%Y")
+table = subset(table,table$`Release Date`>as.Date(fromDate))
+
+```
+
+Scarp movie infromation from imdb by using the title and year in box office table as query. 
+
+```{r,eval=FALSE}
+#Automatically generate json URL
+pageUrlTemplate = "http://www.omdbapi.com/?t=%s&y=%s&plot=full"
+title = table$Movie
+years = year(table$`Release Date`)
+url_all = sprintf(pageUrlTemplate, title, years)
+
+#loop all url to get movie infromation 
+lensOfUrl = length(url_all)
+lensOfSuccess = nrow(imdb_df)
+lensOfErorr = length(err_list) / 2
+loop_num = lensOfSuccess + lensOfErorr + 1
+err_list = list()
+
+for (i in url_all[loop_num:lensOfUrl]){
+  i = gsub('\\s+',"+",i)
+  for(att  in 1:5){#try url 5 times if have try-erroe problem
+    i = try(jsonlite::fromJSON(i))
+    if (class(i) != "try-error") break
+    message(paste("URL ERROR:", loop_num))
+    Sys.sleep(1)
+  }
+  if(class(i) == "try-error"){#add this error to error list
+    message(paste("Load Error:", loop_num))
+    err_list = append(err_list,c(loop_num,table$Movie[loop_num])) 
+    next
+  }
+  if (length(i)==2){#add this error to error list if no content in response page
+    message(paste("Name Error:", loop_num))
+    err_list = append(err_list,c(loop_num,table$Movie[loop_num])) 
+  }
+  else{
+    if(i$Type=="movie"){#only keep the "movie" type 
+      imdb_df_single = as.data.frame(i)
+      imdb_df = rbind(imdb_df,imdb_df_single)
+      message(paste("Success:", loop_num))
+    }
+  }
+  loop_num = loop_num+1
+}
+
+```
+
+Scarp Word-of-mouth scores(by classify funcation) from moviedb by using imdbID in "imdb_df" as query.
+
+Firstly,define classify reviews funcation.
+
+```{r,eval=FALSE}
+#Load dictionary
+words_dict = read.csv("/Users/zxy/Downloads/lexicon.csv", stringsAsFactors=F)
+pos.words = words_dict$word[words_dict$polarity=="positive"]
+neg.words = words_dict$word[words_dict$polarity=="negative"]
+
+# define a fuction to classify words and compute scores(1,0,-1) of every words
+classify_words <- function(words, pos.words, neg.words){
+  # count the number of positive and negative words matches
+  pos.matches = sum(words %in% pos.words)
+  neg.matches = sum(words %in% neg.words)
+  scores = pos.matches - neg.matches
+  return(scores)}
+
+# classify all reviews 
+classify_review <- function(text, pos.words, neg.words){
+  scores = unlist(lapply(text, classify_words, pos.words, neg.words))
+  # compute percentage of positive／negitive／neutral words.
+  n = length(scores)
+  positive = as.numeric(length(which(scores>0))/n)
+  negative = as.numeric(length(which(scores<0))/n)
+  pos_neg = c(positive,negative)
+  return(pos_neg)
+}
+```
+
+Secondly,Scarp Word-of-mouth and generate scores of every movie.
+
+```{r,eval=FALSE}
+api = ""
+url_temp = 'https://api.themoviedb.org/3/movie/%s/reviews?api_key=%s&language=en-US&page=1'
+movieid = connection$imdbID
+url_reviews = sprintf(url_temp, movieid, api)
+
+review_df = data.frame()
+pos_neg = data.frame()
+for (i in 1:length(url_reviews)){
+  url_req = url_reviews[i]
+  for(att  in 1:5){#try url 5 times if have try-erroe problem
+    url_req = try(jsonlite::fromJSON(url_req))
+    if (class(url_req) != "try-error") break
+    message(paste("URL ERROR:", i))
+    Sys.sleep(1)
+  }
+  if(class(url_req) == "try-error"){#add NA value if try-error
+    class_review = c(NA,NA)
+    pos_neg = rbind(pos_neg,class_review)
+    next
+  }
+  if (length(url_req$results) == 0){#add NA value if no response
+    class_review = c(NA,NA)
+    pos_neg = rbind(pos_neg,class_review)
+  }
+  else{#tokenize and classify reviews to compute scores
+    review_df = as.data.frame(url_req$results)
+    reviews_tokens = tokens_wordstem(tokenize(review_df$content, removePunct = TRUE, removeTwitter = TRUE,removeNumbers = TRUE,removeURL = TRUE))
+    class_review = classify_review(reviews_tokens, pos.words, neg.words)
+    pos_neg = rbind(pos_neg,class_review)}
+}  
+```
+
+##3. Clean and merge three data sets.
+
+```{r,eval=FALSE}
+#For movie box office table,reformat money type
+reformatUSD <- function(x) as.numeric(gsub("(\\$|,)", "", ifelse(x == "Unknown", NA, x)))
+table$`Production Budget` = reformatUSD(table$`Production Budget`)
+table$`Domestic Gross` = reformatUSD(table$`Domestic Gross`)
+table$`Worldwide Gross` = reformatUSD(table$`Worldwide Gross`)
+
+#For imdb_df,check the duplicated items and merge imdb and movie box office.
+imdb_sub = subset(imdb_df,!duplicated(imdb_df$imdbID))
+connection = merge(imdb_sub,table,by.x ='Title',by.y = 'Movie')
+#Delet useless information and missing values
+connection = connection[c(-3,-4,-5,-8,-11,-13,-14,-15,-19,-20)]
+connection = na.omit(connection)
+
+#For reviews scores,bind "connection" and "pos_neg"
+colnames(pos_neg) = c("positive","negative")
+connection = cbind(connection,pos_neg)
+#connection_sub = subset(connection,!is.na(connection$positive))
+```
+
+##4. Analyze data
+
+**4.1 descriptive analysis**
+
+4.1.1 The change of Movie budget,domestic gross and worldwird gross through time.
+
+```{r,eval=FALSE}
+gross_long = melt(connection[c("Year","Production Budget","Domestic Gross","Worldwide Gross")],id.vars = "Year")
+colnames(gross_long) = c("Year","Type","Number")
+gross_mean = aggregate(gross_long$Number,gross_long[,c("Year","Type")],FUN = mean)
+```
+```{r,fig.height=3,fig.width=6}
+ggplot(gross_mean, aes(x=Year,y =log(x),color = Type)) +geom_line()
+```
+
+From the figure above,the trend of Domestic Gross is basically the same as the Worldwide Gross, There was a slight decline after 2013 and a rebound after 2015. Production Budget surpassed Domestic Gross between 2016 and 2017.
+
+4.1.2 The distribution of rating & votes
+
+```{r,fig.height=3,fig.width=6,message=FALSE,warning=FALSE}
+p1 = ggplot(connection, aes(connection$imdbVotes)) + geom_histogram(bins = 50, aes(fill = ..count..) )
+p2 = ggplot(connection, aes(connection$imdbRating)) + geom_histogram(bins = 30,binwidth = 0.2, color="white", fill=rgb(0.2,0.7,0.1,0.4))
+grid.arrange(p1, p2)
+```
+
+The distribution of votes is "long tail",which means that only a few movies can recevied many votes.The distribution of rating is skewed distribution and many movies have 6-7 points.
+
+4.1.3 The topic model of movie plot.
+
+```{r,eval=FALSE}
+#tokenize the plot
+stops <- c(tm::stopwords("english"),tm::stopwords("SMART"))%>%gofastr::prep_stopwords() 
+plot_tokens = tokenize(connection$Plot, removePunct = TRUE,removeNumbers = TRUE)
+plot_dfm = dfm(plot_tokens,tolower =TRUE,remove=stops)
+#decide the topic number
+control <- list(burnin = 500, iter = 1000, keep = 100, seed = 2500)
+k <- optimal_k(plot_dfm, 40, control = control)
+```
+```{r,fig.height=3}
+plot(k)
+```
+
+So,Optimal number of topics is 15. Next, build the lda model and plot topic over time.
+
+```{r,eval=FALSE}
+set.seed(123)
+m = LDA(plot_dfm, k = 15, method = "Gibbs", control=list(alpha=.1, iter=100))
+#accoding to the topic key words to define topics
+plot_topics = c("Teenager", "Adventure", "Action", "Comedy", "Crime", "Sci-Fi", "Musical",  "Horror", "Documentary","Friendship","Biography","Thriller","War","Family","Romance")
+colnames(x) = plot_topics[1]
+
+#topic per doc,For every plot,just select the highest possible topic to make it simple
+topic_per_doc= as.data.frame(topics.per.document(m, as.wordassignments = F))
+topic_index = as.vector(apply(topic_per_doc,1,which.max))
+topic_name = sapply(topic_index,function(x){plot_topics[x]})
+connection["topic"] = topic_name
+
+#Plot topic over time
+topic_times = data.frame()#this df contains time, the highest possible of topic,topic name
+for (i in 1:15)
+{ message(i)
+  topic_time = lda.plot.time(m, topic_nr = 3,time_var = connection$`Release Date`,date_interval = 'year',return.values = T)#"lda.plot.time" will return time and the possible of topic
+  topic_time["topic"] = rep(plot_topics[i],5)# add topic name to every row
+  topic_times = rbind(topic_times,df_single)
+}
+```
+```{r,echo=FALSE}
+topic_times = df_all
+```
+```{r,fig.height=3}
+ggplot(topic_times,aes(x = time,y =value,color = topic)) +geom_line()
+```
+
+From the left figture.War, Thriller and romance is the most recent topic in the film, It is very interesting because these topics relate to peace, love and fear. I guess it may be the recent turbulence of the international situation lead to the birth of these types of films.However,compared with other topics, Documentary is the least discussed topic.
+
+```{r,message=FALSE,warning=FALSE,fig.height=3}
+##overlap topic
+cm = cor(t(m@beta))
+colnames(cm) = rownames(cm) = plot_topics
+diag(cm) = 0
+heatmap(cm, symm = T)
+```
+
+From the right figture,topics like "Adventure", "Comedy",  "Musical", "Biography" and "Family" are more likely to overlap.Other topics like thriller,horror, and crime,teenager and friendship are also simliar.
+
+
+**4.2 Bivariate analysis**
+
+4.2.1 Relationship among "Rating","Votes","Production Budget" and "Worldwide.
+
+```{r,eval=FALSE}
+data = connection[c("imdbID","imdbRating","imdbVotes","Production Budget","Worldwide Gross","topic","positive","negative")]
+```
+```{r}
+car::scatterplotMatrix(data[2:5])
+cor(data[2:5])
+```
+
+Ratings and votes are positively correlated with production budget and worldwide gross. There is a high positive relationship between votes and production budget(0.59)/worldwide gross(0.68). Production budget also has a high positive correlation with worldwide gross(0.80).
+
+4.2.2 The differences of "Rating","Votes","Production Budget" and "Worldwide among topics
+
+```{r,eval=FALSE}
+
+data["log_imdbvotes"] = log(data$imdbVotes)
+data['log_Budget'] = log(data$`Production Budget`)
+data['log_gross'] = log(data$`Worldwide Gross`)
+```
+```{r,fig.height=3,fig.width=6,message=FALSE,warning=FALSE}
+p1 = qplot(x=topic, y=imdbRating, data=data, geom=c("boxplot") , fill=topic)
+p2 = qplot(x=topic, y=log_imdbvotes, data=data, geom=c("boxplot") , fill=topic)
+p3 = qplot(x=topic, y=log_Budget, data=data, geom=c("boxplot") , fill=topic)
+p4 = qplot(x=topic, y=log_gross, data=data, geom=c("boxplot") , fill=topic)
+grid.arrange(p1, p2, p3, p4, ncol=2)
+```
+
+From the figures above, differences can be seen in votes, production budget,worldwide gross among different topics.Next, Statistical test will be used to test factors among different topics.
+
+```{r,eval=FALSE}
+bartlett.test(`Production Budget`~topic,data=data)
+kruskal.test(imdbRating~factor(topic), data=data)
+kruskal.test(imdbVotes~factor(topic), data=data)
+kruskal.test(`Production Budget`~factor(topic), data=data)
+kruskal.test(`Worldwide Gross`~factor(topic), data=data)
+```
+
+The bartlett test showed the heterogeneity of variance(p<0.005).Therefore,nonparametric test(kruskal.test) will be used to test the medians differences of factors among topics.
+
+The medians differences of rating among topics is not significant(p >0.5). While there are significant differences in the medians of votes(p<0.001,chi-squared = 38.13), production budget(p<0.001,chi-squared = 70.551),worldwide gross(p<0.001,chi-squared =  39.591) among different topics.
+
+4.2.3 The relationship between word of mouth and movie evaluation(rating,votes,production budget worldwide gross).
+
+```{r,eval=FALSE}
+data_review = na.omit(data[,-6])
+text = scale(data_review[2:7])
+text = as.data.frame(text)
+
+cor.test(data_review$imdbVotes,data_review$positive)
+cor.test(data_review$imdbRating,data_review$positive)
+cor.test(text$`Production Budget`,data_review$positive)
+cor.test(data_review$`Worldwide Gross`,data_review$positive)
+```
+
+Through the corraltion test, thers is positive corraltion between good word of mouth and rating(cor=0.26,p<0.001).However,production budget(cor=-0.1209922,p<0.001) is negatively correlated with good word of mouth.
+
+
+## 5. Conclusion
+
+![Final Results](/Users/zxy/Desktop/屏幕快照 2017-04-09 下午2.51.40.png)
+
+From the table "Final Results",It is clear that ratings positively corelated with votes,budget,gross and good word of mouth. Votes positively corelated with ,budget,gross,and votes has significant difference among different topics(plots). Producation budget highly positively corelated with worldwide gross although it slightly negitively corelated with good word of mouth,and budget also has significant difference among different topics(plots).Perhaps because people have higher psychological expectations on the high cost films, so the negitive word of mouth are related to high budget.
+
+Due to the api restrictions,I can get a small number of comments for every movie.Plus, only half of 660 movies film has commented, leading to the number of WOM's samples does not meet my expectations. In addition, calculate the setiment scores of each film by dictionary anaysis is not accurate, because the words that dictionary contains are limited, and reviews are ambiguity and context-dependency. Aother reason for the problem of analyzing WOM is that most of the reviews would mention the film plot, when the plot has negative words, it is hard to decide whether these negative words belong to the plot or evaluation.Therefore, the dictionary analysis does not recognize these situations, and may make a wrong judgment.
+
+In the future study, a less restrictive api is an alternative choice to scarp more reviews. For word of mouth analysis, Combined with linguistic analysis and machine learning methods to classify positive and negative texts.
+
+
+## 6. References
+
+1. Otterbacher, J. (2010, October). Inferring gender of movie reviewers: exploiting writing style, content and metadata. In Proceedings of the 19th ACM international conference on Information and knowledge management (pp. 369-378). ACM.
+
+2. Thompson, K. M., & Yokota, F. (2004). Violence, sex, and profanity in films: correlation of movie ratings with content. Medscape General Medicine, 6(3), 3.
+
+3. Joshi, M., Das, D., Gimpel, K., & Smith, N. A. (2010, June). Movie reviews and revenues: An experiment in text regression. In Human Language Technologies: The 2010 Annual Conference of the North American Chapter of the Association for Computational Linguistics (pp. 293-296). Association for Computational Linguistics.
+
+4. Duan, W., Gu, B., & Whinston, A. B. (2008). The dynamics of online word-of-mouth and product sales—An empirical investigation of the movie industry. Journal of retailing, 84(2), 233-242.
+
